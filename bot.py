@@ -4,7 +4,6 @@ import aiohttp
 import yfinance as yf
 from datetime import datetime
 
-# ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
@@ -16,147 +15,144 @@ MARKETS = {
     "USDJPY": "JPY=X"
 }
 
-TIMEFRAME = "5m"
-INTERVAL = 60  # seconds
+TIMEFRAME = "15m"
+INTERVAL = 60
 
-# Prevent duplicate signals
-last_signal = {m: None for m in MARKETS}
+stats = {"wins": 0, "losses": 0, "total": 0}
 
-# ================= TELEGRAM =================
 async def send_telegram(session, message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        async with session.post(url, data={"chat_id": CHAT_ID, "text": message}) as resp:
-            await resp.text()
-    except Exception as e:
-        print("Telegram error:", e)
+    await session.post(url, data={"chat_id": CHAT_ID, "text": message})
 
-# ================= DATA =================
 def get_data(symbol):
-    try:
-        data = yf.Ticker(symbol).history(period="1d", interval=TIMEFRAME)
-        return data.tail(50)
-    except:
-        return None
+    return yf.Ticker(symbol).history(period="2d", interval=TIMEFRAME)
 
-# ================= SMC LOGIC =================
-def detect_structure(data):
-    highs = data['High']
-    lows = data['Low']
+# -------- HTF TREND --------
+def get_trend(data):
+    if data['Close'].iloc[-1] > data['Close'].iloc[-20]:
+        return "UPTREND 📈"
+    else:
+        return "DOWNTREND 📉"
 
-    if highs.iloc[-1] > highs.iloc[-10]:
-        return "BULLISH"
-    elif lows.iloc[-1] < lows.iloc[-10]:
-        return "BEARISH"
-    return None
+# -------- STRUCTURE --------
+def get_structure(data):
+    high = data['High']
+    low = data['Low']
 
-def find_swings(data):
-    swing_high = data['High'].rolling(5).max().iloc[-2]
-    swing_low = data['Low'].rolling(5).min().iloc[-2]
-    return swing_high, swing_low
+    if high.iloc[-1] > high.iloc[-10]:
+        return "BOS ↑"
+    elif low.iloc[-1] < low.iloc[-10]:
+        return "BOS ↓"
+    return "No clear BOS"
 
-def generate_trade(price, structure, swing_high, swing_low):
-    if structure == "BULLISH":
-        sl = swing_low
-        risk = price - sl
+# -------- LIQUIDITY --------
+def detect_liquidity(data):
+    recent_high = data['High'].iloc[-5:-1].max()
+    recent_low = data['Low'].iloc[-5:-1].min()
+    current = data['Close'].iloc[-1]
 
-        if risk <= 0:
-            return None
+    if current > recent_high:
+        return "Liquidity Sweep Above 🔝"
+    elif current < recent_low:
+        return "Liquidity Sweep Below 🔻"
+    return "No sweep"
 
-        tp1 = price + risk       # 1R
-        tp2 = price + (risk * 3) # 3R
+# -------- TRADE --------
+def generate_trade(price, trend):
+    risk = price * 0.002
 
-        return {
-            "type": "BUY",
-            "entry": round(price, 2),
-            "sl": round(sl, 2),
-            "tp1": round(tp1, 2),
-            "tp2": round(tp2, 2),
-            "rr": "1:3",
-            "reason": "Bullish BOS + pullback continuation"
-        }
-
-    elif structure == "BEARISH":
-        sl = swing_high
-        risk = sl - price
-
-        if risk <= 0:
-            return None
-
+    if "UPTREND" in trend:
+        sl = price - risk
+        tp1 = price + risk
+        tp2 = price + risk * 3
+        direction = "BUY 📈"
+    else:
+        sl = price + risk
         tp1 = price - risk
-        tp2 = price - (risk * 3)
+        tp2 = price - risk * 3
+        direction = "SELL 📉"
 
-        return {
-            "type": "SELL",
-            "entry": round(price, 2),
-            "sl": round(sl, 2),
-            "tp1": round(tp1, 2),
-            "tp2": round(tp2, 2),
-            "rr": "1:3",
-            "reason": "Bearish BOS + pullback continuation"
-        }
+    return direction, round(sl,2), round(tp1,2), round(tp2,2)
 
-    return None
+# -------- CONFIDENCE --------
+def get_confidence(trend, structure, liquidity):
+    score = 0
 
-# ================= MAIN LOOP =================
+    if "UPTREND" in trend or "DOWNTREND" in trend:
+        score += 1
+    if "BOS" in structure:
+        score += 1
+    if "Sweep" in liquidity:
+        score += 1
+
+    if score == 3:
+        return "HIGH (100%) 🔥"
+    elif score == 2:
+        return "MEDIUM (75%) ⚡"
+    else:
+        return "LOW (50%) ⚠️"
+
+# -------- MAIN --------
 async def main():
-    print("🚀 SMC Bot Running...")
-
+    print("🚀 Institutional SMC Bot Running...")
     async with aiohttp.ClientSession() as session:
         while True:
             for market, symbol in MARKETS.items():
                 try:
                     data = get_data(symbol)
-                    if data is None or data.empty:
-                        continue
-
                     price = data['Close'].iloc[-1]
 
-                    structure = detect_structure(data)
-                    if not structure:
-                        continue
+                    trend = get_trend(data)
+                    structure = get_structure(data)
+                    liquidity = detect_liquidity(data)
 
-                    swing_high, swing_low = find_swings(data)
+                    confidence = get_confidence(trend, structure, liquidity)
 
-                    trade = generate_trade(price, structure, swing_high, swing_low)
-                    if not trade:
-                        continue
+                    direction, sl, tp1, tp2 = generate_trade(price, trend)
 
-                    signal_id = f"{market}_{trade['type']}_{trade['entry']}"
+                    analysis_time = datetime.utcnow().strftime('%H:%M:%S')
 
-                    # Prevent duplicate signals
-                    if last_signal[market] == signal_id:
-                        continue
+                    # -------- ANALYSIS MESSAGE --------
+                    analysis_msg = f"""
+🧠 ANALYSIS REPORT - {market}
 
-                    message = f"""
-💹 {market}
-⏱️ Timeframe: {TIMEFRAME}
+📊 Trend: {trend}
+🏗 Structure: {structure}
+💧 Liquidity: {liquidity}
 
-📊 Direction: {trade['type']} {"📈" if trade['type']=="BUY" else "📉"}
-📍 Entry: {trade['entry']}
+📍 POI: Simulated Order Block Zone
+🎯 Target: Continuation move (3R)
 
-🛑 Stop Loss: {trade['sl']}
-💰 Partial TP (1R): {trade['tp1']}
-🎯 Final TP (3R): {trade['tp2']}
+⚖️ Confidence: {confidence}
+⏱ Analysis Time: {analysis_time}
+"""
+                    await send_telegram(session, analysis_msg)
 
-🔒 Move SL to Breakeven at TP1
-⚖️ Risk/Reward: {trade['rr']}
+                    # -------- TRADE MESSAGE --------
+                    trade_msg = f"""
+💹 TRADE EXECUTION - {market}
 
-🧠 Analysis:
-• Structure: {structure} BOS
-• Setup: {trade['reason']}
-• Model: SMC Pullback Strategy
+📊 Direction: {direction}
+📍 Entry: {round(price,2)}
+
+🛑 SL: {sl}
+💰 TP1: {tp1}
+🎯 TP2: {tp2}
+
+🔒 Move SL to BE at TP1
+⚖️ RR: 1:3
+
+🧠 Reason:
+Trend + BOS + Liquidity confirmation
 
 📅 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
 """
+                    await send_telegram(session, trade_msg)
 
-                    await send_telegram(session, message)
-                    last_signal[market] = signal_id
-
-                    print(f"Sent {market} {trade['type']}")
+                    stats["total"] += 1
 
                 except Exception as e:
-                    print(f"Error {market}:", e)
+                    print("Error:", e)
 
             await asyncio.sleep(INTERVAL)
 
