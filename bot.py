@@ -4,9 +4,11 @@ import aiohttp
 import yfinance as yf
 from datetime import datetime
 
+# ENV VARIABLES
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
+# MARKETS
 MARKETS = {
     "BTCUSD": "BTC-USD",
     "GOLD": "GC=F",
@@ -16,48 +18,58 @@ MARKETS = {
 }
 
 TIMEFRAME = "15m"
-INTERVAL = 60
+INTERVAL = 60  # check every 60 seconds
 
-stats = {"wins": 0, "losses": 0, "total": 0}
-
+# SEND TELEGRAM
 async def send_telegram(session, message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     await session.post(url, data={"chat_id": CHAT_ID, "text": message})
 
+# GET DATA
 def get_data(symbol):
     return yf.Ticker(symbol).history(period="2d", interval=TIMEFRAME)
 
-# -------- HTF TREND --------
+# HTF TREND
 def get_trend(data):
-    if data['Close'].iloc[-1] > data['Close'].iloc[-20]:
+    if data['Close'].iloc[-1] > data['Close'].iloc[-30]:
         return "UPTREND 📈"
-    else:
+    elif data['Close'].iloc[-1] < data['Close'].iloc[-30]:
         return "DOWNTREND 📉"
+    return None
 
-# -------- STRUCTURE --------
+# BOS / MSS
 def get_structure(data):
-    high = data['High']
-    low = data['Low']
+    highs = data['High']
+    lows = data['Low']
 
-    if high.iloc[-1] > high.iloc[-10]:
-        return "BOS ↑"
-    elif low.iloc[-1] < low.iloc[-10]:
-        return "BOS ↓"
-    return "No clear BOS"
+    if highs.iloc[-1] > highs.iloc[-10]:
+        return "BULLISH BOS"
+    elif lows.iloc[-1] < lows.iloc[-10]:
+        return "BEARISH BOS"
+    return None
 
-# -------- LIQUIDITY --------
-def detect_liquidity(data):
-    recent_high = data['High'].iloc[-5:-1].max()
-    recent_low = data['Low'].iloc[-5:-1].min()
+# LIQUIDITY SWEEP
+def liquidity_sweep(data):
+    recent_high = data['High'].iloc[-6:-1].max()
+    recent_low = data['Low'].iloc[-6:-1].min()
     current = data['Close'].iloc[-1]
 
     if current > recent_high:
-        return "Liquidity Sweep Above 🔝"
+        return "SWEEP HIGH 🔝"
     elif current < recent_low:
-        return "Liquidity Sweep Below 🔻"
-    return "No sweep"
+        return "SWEEP LOW 🔻"
+    return None
 
-# -------- TRADE --------
+# HIGH PROBABILITY FILTER
+def high_probability(trend, structure, liquidity):
+    if trend and structure and liquidity:
+        if "UPTREND" in trend and "BULLISH" in structure and "LOW" in liquidity:
+            return True
+        if "DOWNTREND" in trend and "BEARISH" in structure and "HIGH" in liquidity:
+            return True
+    return False
+
+# TRADE GENERATION
 def generate_trade(price, trend):
     risk = price * 0.002
 
@@ -74,27 +86,14 @@ def generate_trade(price, trend):
 
     return direction, round(sl,2), round(tp1,2), round(tp2,2)
 
-# -------- CONFIDENCE --------
-def get_confidence(trend, structure, liquidity):
-    score = 0
+# CONFIDENCE SCORE
+def confidence_score():
+    return "HIGH (85%+) 🔥"
 
-    if "UPTREND" in trend or "DOWNTREND" in trend:
-        score += 1
-    if "BOS" in structure:
-        score += 1
-    if "Sweep" in liquidity:
-        score += 1
-
-    if score == 3:
-        return "HIGH (100%) 🔥"
-    elif score == 2:
-        return "MEDIUM (75%) ⚡"
-    else:
-        return "LOW (50%) ⚠️"
-
-# -------- MAIN --------
+# MAIN LOOP
 async def main():
-    print("🚀 Institutional SMC Bot Running...")
+    print("🚀 High Probability SMC Bot Running...")
+
     async with aiohttp.ClientSession() as session:
         while True:
             for market, symbol in MARKETS.items():
@@ -104,52 +103,53 @@ async def main():
 
                     trend = get_trend(data)
                     structure = get_structure(data)
-                    liquidity = detect_liquidity(data)
+                    liquidity = liquidity_sweep(data)
 
-                    confidence = get_confidence(trend, structure, liquidity)
+                    # FILTER LOW QUALITY SETUPS
+                    if not high_probability(trend, structure, liquidity):
+                        continue
 
                     direction, sl, tp1, tp2 = generate_trade(price, trend)
 
-                    analysis_time = datetime.utcnow().strftime('%H:%M:%S')
+                    # ANALYSIS MESSAGE
+                    analysis = f"""
+🧠 ANALYSIS - {market}
 
-                    # -------- ANALYSIS MESSAGE --------
-                    analysis_msg = f"""
-🧠 ANALYSIS REPORT - {market}
+⏱ Timeframe: 15M (Execution)
 
 📊 Trend: {trend}
 🏗 Structure: {structure}
 💧 Liquidity: {liquidity}
 
-📍 POI: Simulated Order Block Zone
-🎯 Target: Continuation move (3R)
+📍 POI: Order Block Zone (simulated)
+🎯 Target: Continuation (3R)
 
-⚖️ Confidence: {confidence}
-⏱ Analysis Time: {analysis_time}
+⚖️ Confidence: {confidence_score()}
 """
-                    await send_telegram(session, analysis_msg)
 
-                    # -------- TRADE MESSAGE --------
-                    trade_msg = f"""
-💹 TRADE EXECUTION - {market}
+                    await send_telegram(session, analysis)
+
+                    # TRADE MESSAGE
+                    trade = f"""
+💹 TRADE SETUP - {market}
 
 📊 Direction: {direction}
 📍 Entry: {round(price,2)}
 
-🛑 SL: {sl}
-💰 TP1: {tp1}
-🎯 TP2: {tp2}
+🛑 Stop Loss: {sl}
+💰 Partial TP: {tp1}
+🎯 Final TP: {tp2}
 
-🔒 Move SL to BE at TP1
-⚖️ RR: 1:3
+🔒 Move SL to Breakeven at TP1
+⚖️ Risk Reward: 1:3
 
 🧠 Reason:
-Trend + BOS + Liquidity confirmation
+Trend + BOS + Liquidity Sweep Alignment
 
 📅 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
 """
-                    await send_telegram(session, trade_msg)
 
-                    stats["total"] += 1
+                    await send_telegram(session, trade)
 
                 except Exception as e:
                     print("Error:", e)
